@@ -1,6 +1,7 @@
 /**
  * Central gameplay tuning. Everything designers tweak often lives here.
  */
+import type { PressureConfig } from '../types';
 
 export const DESIGN_WIDTH = 540;
 export const DESIGN_HEIGHT = 960;
@@ -30,7 +31,39 @@ export const VEHICLE = {
     brake: 195,
     gap: 13,
   },
+  /** Emergency vehicle: quick but obeys every rule the other vehicles do. */
+  ambulance: {
+    length: 56,
+    width: 27,
+    maxSpeed: 175,
+    accel: 165,
+    brake: 320,
+    gap: 10,
+  },
 } as const;
+
+/**
+ * Traffic Pressure defaults (Gameplay V2). Levels enable the system with
+ * `pressure: { enabled: true }` and may override any field.
+ *
+ * Fairness model: a single waiting car adds nothing during the grace period and
+ * only 2.5%/s afterwards, so pressure is driven by *many* cars waiting *long*:
+ * two cars held for 10s ≈ 40%, three cars in one lane held for 10s ≈ 85%.
+ * Flowing traffic recovers 6%/s and every exit gives an instant relief.
+ */
+export const PRESSURE: PressureConfig = {
+  enabled: false,
+  graceSeconds: 2.5,
+  waitRate: 0.025,
+  queueThreshold: 2,
+  queueBoost: 0.5,
+  recoverRate: 0.06,
+  clearRelief: 0.02,
+  failAt: 1,
+};
+
+/** Speed (px/s) below which a vehicle counts as waiting in a queue. */
+export const WAITING_SPEED = 5;
 
 export const SIM = {
   /** Extra bumper gap kept when following another vehicle. */

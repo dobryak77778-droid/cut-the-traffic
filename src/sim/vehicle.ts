@@ -27,6 +27,8 @@ export interface SimVehicle {
   spawnTime: number;
   /** Cumulative seconds spent essentially stopped (for perfect-flow). */
   stopTime: number;
+  /** Seconds of the *current* stop (resets when the vehicle moves again). */
+  waitTime: number;
   /** Set on the frame a crash involves this vehicle. */
   crashed: boolean;
 }
@@ -51,6 +53,7 @@ export function createVehicle(
     spec,
     spawnTime,
     stopTime: 0,
+    waitTime: 0,
     crashed: false,
   };
 }
@@ -106,7 +109,12 @@ export function stepVehicle(ev: SimVehicle, ctx: StepContext): void {
   ev.v = Math.max(0, next);
   ev.s += ev.v * dt;
 
-  if (ev.v < 5) ev.stopTime += dt;
+  if (ev.v < 5) {
+    ev.stopTime += dt;
+    ev.waitTime += dt;
+  } else {
+    ev.waitTime = 0;
+  }
 }
 
 export interface CollisionInfo {

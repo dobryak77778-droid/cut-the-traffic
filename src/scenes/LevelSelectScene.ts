@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { objectiveCardLabel } from '../sim/objectives';
 import { DESIGN_HEIGHT, DESIGN_WIDTH } from '../config/game';
 import { LEVELS } from '../data/levels';
 import { getAnalytics } from '../services/analytics';
@@ -104,7 +105,7 @@ export default class LevelSelectScene extends Phaser.Scene {
           done && best !== undefined
             ? `BEST ${best.toFixed(1)}s`
             : unlocked
-              ? `${level.spawn.length} VEHICLES`
+              ? objectiveCardLabel(level.objective)
               : 'LOCKED',
           {
             fontFamily: FONT,

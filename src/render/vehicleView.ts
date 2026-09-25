@@ -15,6 +15,7 @@ let textureSeq = 0;
 export function textureFor(type: VehicleType, id: number): string {
   if (type === 'car') return `tex-car-${id % 6}`;
   if (type === 'van') return `tex-van-${id % 4}`;
+  if (type === 'ambulance') return 'tex-ambulance-0';
   return `tex-truck-${id % 4}`;
 }
 
@@ -31,6 +32,10 @@ export class VehicleView {
   private bobPhase = (textureSeq++ % 100) * 0.37;
   private lastV = 0;
   private crashed = false;
+  /** Ambulance-only: flashing light bar + soft glow. */
+  private beacon: Phaser.GameObjects.Image | null = null;
+  private glow: Phaser.GameObjects.Image | null = null;
+  private beaconClock = 0;
 
   constructor(scene: Phaser.Scene, ev: SimVehicle, layout: LevelLayout) {
     this.root = scene.add.container(0, 0).setDepth(5);
@@ -42,6 +47,14 @@ export class VehicleView {
     this.shadow.setDisplaySize(spec.length + 12, spec.width * 1.4);
 
     this.inner.add(this.sprite);
+    if (ev.type === 'ambulance') {
+      // Soft alternating glow under the vehicle + the two-lamp bar on the roof.
+      this.glow = scene.add.image(0, 0, 'shadow').setTint(0xff4d4d).setAlpha(0.22);
+      this.glow.setDisplaySize(spec.length + 40, spec.width * 2.6);
+      this.beacon = scene.add.image(spec.length / 2 - 24.5, 0, 'amb-light-a').setOrigin(0.5);
+      this.inner.addAt(this.glow, 0);
+      this.inner.add(this.beacon);
+    }
     this.root.add([this.shadow, this.inner]);
     this.sync(ev, layout, 0);
   }
@@ -63,12 +76,23 @@ export class VehicleView {
     this.inner.y = bob;
     this.inner.rotation = angle + Math.cos(this.bobPhase) * 0.016 * speedRatio + lean;
     this.lastV = ev.v;
+
+    if (this.beacon && this.glow && !this.crashed) {
+      // ~3.3 Hz alternation – readable, not strobing.
+      this.beaconClock += dt;
+      const phaseA = Math.floor(this.beaconClock * 6.6) % 2 === 0;
+      this.beacon.setTexture(phaseA ? 'amb-light-a' : 'amb-light-b');
+      this.glow.setTint(phaseA ? 0xff4d4d : 0x4aa8ff);
+      this.glow.setAlpha(0.16 + 0.08 * Math.abs(Math.sin(this.beaconClock * Math.PI * 6.6)));
+    }
   }
 
   markCrashed(): void {
     if (this.crashed) return;
     this.crashed = true;
     this.sprite.setTint(0xfff0c0);
+    this.glow?.setAlpha(0);
+    this.beacon?.setTexture('amb-light-a');
   }
 
   destroy(): void {

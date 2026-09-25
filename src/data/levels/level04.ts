@@ -1,7 +1,11 @@
 import type { LevelConfig } from '../../types';
 import { GROUPS, makeLevel, schedule } from './common';
 
-/** Level 4 – Vans: slower to accelerate, a bit longer, need earlier greens. */
+/**
+ * Level 4 – Vans: slower to accelerate, a bit longer, need earlier greens.
+ * Gameplay V2: QUEUE_LIMIT – no lane may hold more than 2 waiting vehicles,
+ * so the player must alternate before a queue builds up.
+ */
 export const level04: LevelConfig = makeLevel(
   4,
   'Deliveries',
@@ -19,5 +23,9 @@ export const level04: LevelConfig = makeLevel(
     { type: 'car', dir: 'E' },
     { type: 'van', dir: 'N' },
   ]),
-  { parTime: 26 },
+  {
+    parTime: 26,
+    objective: { type: 'QUEUE_LIMIT', maxQueue: 2 },
+    pressure: { enabled: true },
+  },
 );

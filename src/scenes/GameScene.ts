@@ -1,8 +1,9 @@
 import Phaser from 'phaser';
 import { CRASH, DESIGN_HEIGHT, DESIGN_WIDTH, SIM } from '../config/game';
 import { getLevel, nextLevelId } from '../data/levels';
-import type { LevelConfig, LightGroupDef } from '../types';
+import type { FailReason, LevelConfig, LightGroupDef } from '../types';
 import { TrafficSim } from '../sim/trafficSim';
+import { failSubtitle, failTitle, objectiveSubtitle, objectiveTitle } from '../sim/objectives';
 import { VehicleView } from '../render/vehicleView';
 import { LightButton } from '../ui/LightButton';
 import { FONT, PALETTE, makePanel, makeTextButton } from '../ui/widgets';
@@ -18,6 +19,22 @@ export interface GameSceneData {
 }
 
 type SceneState = 'play' | 'cine' | 'celebrate' | 'panel' | 'transition';
+
+/** Pressure-meter presentation tuning (visual/audio only – no gameplay effect). */
+const PRESSURE_UI = {
+  barWidth: 250,
+  barHeight: 9,
+  y: 100,
+  /** Vignette starts fading in above this value. */
+  vignetteFrom: 0.55,
+  vignetteMaxAlpha: 0.26,
+  /** Audio cue thresholds (with hysteresis so they never repeat rapidly). */
+  warnAt: 0.6,
+  criticalAt: 0.85,
+  hysteresis: 0.1,
+  /** Slow pulse on the bar once past this value. */
+  pulseFrom: 0.8,
+} as const;
 
 const SLOT_POS: Record<'bl' | 'br' | 'tl' | 'tr', { x: number; y: number }> = {
   bl: { x: 74, y: DESIGN_HEIGHT - 92 },
@@ -51,6 +68,18 @@ export default class GameScene extends Phaser.Scene {
   private leftText!: Phaser.GameObjects.Text;
   private hintText: Phaser.GameObjects.Text | null = null;
   private hintBg: Phaser.GameObjects.Graphics | null = null;
+  private hintSub: Phaser.GameObjects.Text | null = null;
+
+  // Gameplay V2 HUD
+  private pressureBar: Phaser.GameObjects.Graphics | null = null;
+  private pressureLabel: Phaser.GameObjects.Text | null = null;
+  private vignette: Phaser.GameObjects.Graphics | null = null;
+  private pulseClock = 0;
+  private warnPlayed = false;
+  private criticalPlayed = false;
+  private highTracked = false;
+  private ambulanceAnnounced = false;
+  private ambulanceCleared = false;
 
   constructor() {
     super('Game');
@@ -68,6 +97,20 @@ export default class GameScene extends Phaser.Scene {
     this.cineReturnStarted = false;
     this.hintText = null;
     this.hintBg = null;
+    this.hintSub = null;
+    this.pressureBar = null;
+    this.pressureLabel = null;
+    this.vignette = null;
+    this.resetFeedbackFlags();
+  }
+
+  private resetFeedbackFlags(): void {
+    this.pulseClock = 0;
+    this.warnPlayed = false;
+    this.criticalPlayed = false;
+    this.highTracked = false;
+    this.ambulanceAnnounced = false;
+    this.ambulanceCleared = false;
   }
 
   create(): void {
@@ -89,6 +132,8 @@ export default class GameScene extends Phaser.Scene {
       level: this.level.id,
       attempt: this.attempt,
       vehicles: this.level.spawn.length,
+      objectiveType: this.level.objective.type,
+      pressureEnabled: this.sim.pressure.enabled,
     });
 
     this.cameras.main.fadeIn(160, 10, 13, 18);
@@ -156,6 +201,186 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
       .setDepth(30);
+
+    if (this.sim.pressure.enabled) {
+      // Screen-edge vignette: only visible once pressure runs high.
+      this.vignette = this.add.graphics().setDepth(20).setAlpha(0);
+      const band = 70;
+      for (let i = 0; i < 6; i++) {
+        const t = i / 6;
+        const inset = band * t;
+        this.vignette.lineStyle(band / 6 + 1, 0xd8342b, 0.18 * (1 - t));
+        this.vignette.strokeRect(
+          inset,
+          inset,
+          DESIGN_WIDTH - inset * 2,
+          DESIGN_HEIGHT - inset * 2,
+        );
+      }
+
+      this.pressureLabel = this.add
+        .text(W / 2 - PRESSURE_UI.barWidth / 2, PRESSURE_UI.y - 14, 'PRESSURE', {
+          fontFamily: FONT,
+          fontSize: '10px',
+          fontStyle: '700',
+          color: '#93a1b3',
+          letterSpacing: 2,
+        })
+        .setOrigin(0, 0.5)
+        .setDepth(30);
+      this.pressureBar = this.add.graphics().setDepth(30);
+      this.drawPressureBar(0);
+    }
+  }
+
+  /** Objective-specific threshold marker on the pressure bar (0..1 or null). */
+  private pressureMarker(): number | null {
+    const obj = this.level.objective;
+    if (obj.type === 'PRESSURE_LIMIT') return obj.maxPressure;
+    const failAt = this.sim.pressure.config.failAt;
+    return failAt < 1 ? failAt : null;
+  }
+
+  private drawPressureBar(value: number): void {
+    const g = this.pressureBar;
+    if (!g) return;
+    const { barWidth: w, barHeight: h, y } = PRESSURE_UI;
+    const x = DESIGN_WIDTH / 2 - w / 2;
+    const color = value < 0.5 ? 0x2fbf71 : value < 0.8 ? 0xf5a524 : 0xff5a4d;
+    g.clear();
+    g.fillStyle(0x0f141b, 0.75);
+    g.fillRoundedRect(x - 2, y - 2, w + 4, h + 4, (h + 4) / 2);
+    g.fillStyle(0x2a3341, 1);
+    g.fillRoundedRect(x, y, w, h, h / 2);
+    const fill = Math.max(0, Math.min(1, value)) * w;
+    if (fill > h) {
+      g.fillStyle(color, 1);
+      g.fillRoundedRect(x, y, fill, h, h / 2);
+    } else if (fill > 0) {
+      g.fillStyle(color, 1);
+      g.fillCircle(x + h / 2, y + h / 2, h / 2);
+    }
+    const marker = this.pressureMarker();
+    if (marker !== null) {
+      g.fillStyle(0xffffff, 0.85);
+      g.fillRect(x + marker * w - 1, y - 3, 2, h + 6);
+    }
+    if (this.pressureLabel) {
+      this.pressureLabel.setText(`PRESSURE ${Math.round(value * 100)}%`);
+    }
+  }
+
+  /** Update meter, vignette and audio cues from the current pressure value. */
+  private updatePressureFeedback(dt: number): void {
+    if (!this.sim.pressure.enabled) return;
+    const p = this.sim.pressure.value;
+    this.drawPressureBar(p);
+
+    // Subtle pulse only when it really matters.
+    if (this.pressureBar) {
+      if (p >= PRESSURE_UI.pulseFrom) {
+        this.pulseClock += dt;
+        this.pressureBar.setAlpha(0.8 + 0.2 * Math.sin(this.pulseClock * Math.PI * 2 * 1.4));
+      } else {
+        this.pulseClock = 0;
+        this.pressureBar.setAlpha(1);
+      }
+    }
+    if (this.vignette) {
+      const t = (p - PRESSURE_UI.vignetteFrom) / (1 - PRESSURE_UI.vignetteFrom);
+      const target = Math.max(0, Math.min(1, t)) * PRESSURE_UI.vignetteMaxAlpha;
+      // Ease towards the target so it never pops.
+      this.vignette.setAlpha(this.vignette.alpha + (target - this.vignette.alpha) * Math.min(1, dt * 4));
+    }
+
+    // Audio cues with hysteresis (sound gating happens inside AudioManager).
+    if (!this.warnPlayed && p >= PRESSURE_UI.warnAt) {
+      this.warnPlayed = true;
+      audio.play('pressureWarn');
+    } else if (this.warnPlayed && p < PRESSURE_UI.warnAt - PRESSURE_UI.hysteresis) {
+      this.warnPlayed = false;
+    }
+    if (!this.criticalPlayed && p >= PRESSURE_UI.criticalAt) {
+      this.criticalPlayed = true;
+      audio.play('pressureCritical');
+      vibrate(30);
+    } else if (this.criticalPlayed && p < PRESSURE_UI.criticalAt - PRESSURE_UI.hysteresis) {
+      this.criticalPlayed = false;
+    }
+    if (!this.highTracked && p >= 0.8) {
+      this.highTracked = true;
+      getAnalytics().track('pressure_high', {
+        level: this.level.id,
+        attempt: this.attempt,
+        time: round1(this.sim.displayTime),
+        pressure: round2(p),
+      });
+    }
+  }
+
+  /** Ambulance arrival / crossing feedback for the EMERGENCY objective. */
+  private updateEmergencyFeedback(): void {
+    const em = this.sim.emergency;
+    if (!em) return;
+    if (em.active && !this.ambulanceAnnounced) {
+      this.ambulanceAnnounced = true;
+      audio.play('siren');
+      vibrate([25, 40, 25]);
+      this.toast('AMBULANCE!', '#ff6b5e');
+      getAnalytics().track('ambulance_spawned', {
+        level: this.level.id,
+        attempt: this.attempt,
+        time: round1(this.sim.displayTime),
+        timeLimit: em.timeLimit,
+      });
+    }
+    if (em.crossed && !this.ambulanceCleared) {
+      this.ambulanceCleared = true;
+      audio.play('ambulanceClear');
+      this.toast('AMBULANCE THROUGH', '#6fdca4');
+      getAnalytics().track('ambulance_success', {
+        level: this.level.id,
+        attempt: this.attempt,
+        time: round1(this.sim.displayTime),
+        secondsLeft: round1(em.remaining),
+        timeLimit: em.timeLimit,
+      });
+    }
+  }
+
+  /** Short centred toast used for objective beats. */
+  private toast(label: string, color: string): void {
+    const t = this.add
+      .text(DESIGN_WIDTH / 2, DESIGN_HEIGHT / 2 - 120, label, {
+        fontFamily: FONT,
+        fontSize: '26px',
+        fontStyle: '800',
+        color,
+        stroke: '#0f141b',
+        strokeThickness: 4,
+        letterSpacing: 1,
+      })
+      .setOrigin(0.5)
+      .setDepth(45)
+      .setAlpha(0)
+      .setScale(0.85);
+    this.tweens.add({
+      targets: t,
+      alpha: 1,
+      scale: 1,
+      duration: 180,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.tweens.add({
+          targets: t,
+          alpha: 0,
+          y: t.y - 18,
+          delay: 900,
+          duration: 320,
+          onComplete: () => t.destroy(),
+        });
+      },
+    });
   }
 
   private createLightButtons(): void {
@@ -167,43 +392,110 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Objective card shown briefly at level start: headline (the objective),
+   * a one-line explanation, and the level's short hint. No tutorial.
+   */
   private showHint(): void {
     const W = DESIGN_WIDTH;
-    const y = DESIGN_HEIGHT - 210;
+    const y = DESIGN_HEIGHT - 232;
+    const title = objectiveTitle(this.level.objective);
+    const sub = objectiveSubtitle(this.level.objective);
+    const hint = this.level.hint;
+
+    const w = Math.min(W - 40, Math.max(280, title.length * 12 + 64));
+    const h = 92;
     this.hintBg = this.add.graphics().setDepth(26);
-    this.hintBg.fillStyle(0x0f141b, 0.82);
-    const label = this.level.hint;
-    const w = Math.max(200, label.length * 12 + 56);
-    this.hintBg.fillRoundedRect(W / 2 - w / 2, y - 20, w, 40, 20);
+    this.hintBg.fillStyle(0x0f141b, 0.86);
+    this.hintBg.fillRoundedRect(W / 2 - w / 2, y - h / 2, w, h, 18);
+    this.hintBg.lineStyle(2, 0xf5a524, 0.55);
+    this.hintBg.strokeRoundedRect(W / 2 - w / 2, y - h / 2, w, h, 18);
 
     this.hintText = this.add
-      .text(W / 2, y, label, {
+      .text(W / 2, y - 22, title, {
         fontFamily: FONT,
-        fontSize: '16px',
-        fontStyle: '700',
+        fontSize: '18px',
+        fontStyle: '800',
         color: '#f5a524',
         letterSpacing: 1,
       })
       .setOrigin(0.5)
       .setDepth(26);
+    this.hintSub = this.add
+      .text(W / 2, y + 6, sub, {
+        fontFamily: FONT,
+        fontSize: '13px',
+        color: '#d5dde8',
+        align: 'center',
+        wordWrap: { width: w - 28 },
+      })
+      .setOrigin(0.5)
+      .setDepth(26);
+    const hintLine = this.add
+      .text(W / 2, y + 30, hint, {
+        fontFamily: FONT,
+        fontSize: '11px',
+        fontStyle: '700',
+        color: '#93a1b3',
+        letterSpacing: 2,
+      })
+      .setOrigin(0.5)
+      .setDepth(26);
 
+    const targets = [this.hintBg, this.hintText, this.hintSub, hintLine];
+    for (const t of targets) t.setAlpha(0);
+    this.tweens.add({ targets, alpha: 1, duration: 220 });
     this.tweens.add({
-      targets: [this.hintBg, this.hintText],
+      targets,
       alpha: 0,
-      delay: 2400,
+      delay: 3000,
       duration: 500,
       onComplete: () => {
-        this.hintBg?.destroy();
-        this.hintText?.destroy();
+        for (const t of targets) t.destroy();
         this.hintBg = null;
         this.hintText = null;
+        this.hintSub = null;
       },
     });
   }
 
   private updateHud(): void {
     this.timeText.setText(`${this.sim.displayTime.toFixed(1)}s`);
-    this.leftText.setText(`${this.sim.remaining} CARS LEFT`);
+    this.leftText.setText(this.objectiveStatusLine());
+  }
+
+  /** Only what the current objective needs – keeps the HUD readable on phones. */
+  private objectiveStatusLine(): string {
+    const obj = this.level.objective;
+    const left = `${this.sim.remaining} CARS LEFT`;
+    switch (obj.type) {
+      case 'SURVIVE':
+        return `SURVIVE ${Math.ceil(this.sim.surviveRemaining)}s`;
+      case 'QUEUE_LIMIT':
+        return `QUEUE ${this.sim.longestQueue}/${obj.maxQueue}  ·  ${left}`;
+      case 'EMERGENCY': {
+        const em = this.sim.emergency;
+        if (em && em.active && !em.crossed) return `AMBULANCE ${em.remaining.toFixed(1)}s`;
+        if (em && em.crossed) return `AMBULANCE THROUGH  ·  ${left}`;
+        return left;
+      }
+      case 'PRESSURE_LIMIT':
+      case 'CLEAR_TRAFFIC':
+      default:
+        return left;
+    }
+  }
+
+  private setStatusColor(): void {
+    const obj = this.level.objective;
+    let color = '#93a1b3';
+    if (obj.type === 'QUEUE_LIMIT' && this.sim.longestQueue >= obj.maxQueue) color = '#ff8c42';
+    if (obj.type === 'EMERGENCY') {
+      const em = this.sim.emergency;
+      if (em && em.active && !em.crossed) color = em.remaining < 5 ? '#ff6b5e' : '#ffd166';
+    }
+    if (obj.type === 'SURVIVE' && this.sim.surviveRemaining <= 5) color = '#6fdca4';
+    this.leftText.setColor(color);
   }
 
   private refreshButtons(): void {
@@ -261,7 +553,11 @@ export default class GameScene extends Phaser.Scene {
         this.syncViews(delta / 1000);
         this.refreshButtons();
         this.updateHud();
+        this.setStatusColor();
+        this.updatePressureFeedback(delta / 1000);
+        this.updateEmergencyFeedback();
         if (this.sim.phase === 'crash') this.beginCrash();
+        else if (this.sim.phase === 'failed') this.beginObjectiveFail();
         else if (this.sim.phase === 'complete') this.beginComplete();
         break;
       }
@@ -280,7 +576,9 @@ export default class GameScene extends Phaser.Scene {
             ease: 'Cubic.easeInOut',
           });
         }
-        if (this.cineTime >= CRASH.slowmoDurationMs) this.showFailPanel();
+        if (this.cineTime >= CRASH.slowmoDurationMs) {
+          this.showFailPanel(this.sim.failReason ?? 'crash');
+        }
         break;
       }
       case 'celebrate':
@@ -306,9 +604,13 @@ export default class GameScene extends Phaser.Scene {
       level: this.level.id,
       attempt: this.attempt,
       failureTime: round1(this.sim.displayTime),
+      reason: 'crash',
+      objectiveType: this.level.objective.type,
       vehicleTypeA: crash.a.type,
       vehicleTypeB: crash.b.type,
+      pressure: round2(this.sim.pressure.value),
     });
+    this.trackObjectiveFailed('crash');
 
     const cam = this.cameras.main;
     cam.shake(CRASH.shakeDurationMs, CRASH.shakeIntensity);
@@ -365,7 +667,78 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
-  private showFailPanel(): void {
+  // -------------------------------------------------- objective failure ----
+  /** Non-crash failure (gridlock / queue overflow / ambulance timeout). */
+  private beginObjectiveFail(): void {
+    const reason = this.sim.failReason ?? 'gridlock';
+    this.state = 'cine';
+    this.hadCollision = true; // "afterFailure" semantics for restart analytics
+    this.cineTime = 0;
+    this.cineReturnStarted = true;
+    audio.stopEngine();
+    audio.play('gridlock');
+    vibrate([60, 40, 60]);
+
+    const em = this.sim.emergency;
+    getAnalytics().track('level_failed', {
+      level: this.level.id,
+      attempt: this.attempt,
+      failureTime: round1(this.sim.displayTime),
+      reason,
+      objectiveType: this.level.objective.type,
+      pressure: round2(this.sim.pressure.value),
+      longestQueue: this.sim.maxQueueSeen,
+    });
+    this.trackObjectiveFailed(reason);
+    if (reason === 'gridlock') {
+      getAnalytics().track('gridlock_failure', {
+        level: this.level.id,
+        attempt: this.attempt,
+        time: round1(this.sim.displayTime),
+        pressurePeak: round2(this.sim.pressure.peak),
+        longestQueue: this.sim.maxQueueSeen,
+      });
+    } else if (reason === 'queue_limit') {
+      getAnalytics().track('queue_limit_failure', {
+        level: this.level.id,
+        attempt: this.attempt,
+        time: round1(this.sim.displayTime),
+        longestQueue: this.sim.maxQueueSeen,
+        pressure: round2(this.sim.pressure.value),
+      });
+    } else if (reason === 'emergency_timeout') {
+      getAnalytics().track('ambulance_failure', {
+        level: this.level.id,
+        attempt: this.attempt,
+        time: round1(this.sim.displayTime),
+        timeLimit: em?.timeLimit,
+        pressure: round2(this.sim.pressure.value),
+      });
+    }
+
+    // Quiet beat instead of the crash cinematic: a soft red wash and a pause.
+    const wash = this.add
+      .rectangle(0, 0, DESIGN_WIDTH, DESIGN_HEIGHT, 0xd8342b, 0.22)
+      .setOrigin(0)
+      .setDepth(40);
+    this.tweens.add({ targets: wash, alpha: 0, duration: 520, onComplete: () => wash.destroy() });
+    this.cameras.main.shake(220, 0.004);
+    // The 'cine' branch of update() eases traffic to a halt and opens the
+    // panel (with this reason) after the usual slow-mo beat.
+  }
+
+  private trackObjectiveFailed(reason: FailReason): void {
+    getAnalytics().track('objective_failed', {
+      level: this.level.id,
+      attempt: this.attempt,
+      objectiveType: this.level.objective.type,
+      reason,
+      time: round1(this.sim.displayTime),
+      pressurePeak: round2(this.sim.pressure.peak),
+    });
+  }
+
+  private showFailPanel(reason: FailReason = 'crash'): void {
     this.state = 'panel';
     this.cameras.main.setScroll(0, 0);
     this.cameras.main.setZoom(1);
@@ -375,9 +748,9 @@ export default class GameScene extends Phaser.Scene {
     panel.setPosition(W / 2, DESIGN_HEIGHT / 2 + 8).setDepth(50);
 
     const title = this.add
-      .text(0, -152, 'CRASH!', {
+      .text(0, -152, failTitle(reason), {
         fontFamily: FONT,
-        fontSize: '44px',
+        fontSize: reason === 'crash' ? '44px' : '38px',
         fontStyle: '800',
         color: '#ff6b5e',
         stroke: '#4a1512',
@@ -385,7 +758,7 @@ export default class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
     const sub = this.add
-      .text(0, -108, 'Two cars collided in the junction', {
+      .text(0, -108, failSubtitle(reason), {
         fontFamily: FONT,
         fontSize: '16px',
         color: '#aeb8c6',
@@ -414,7 +787,12 @@ export default class GameScene extends Phaser.Scene {
     const children: Phaser.GameObjects.GameObject[] = [title, sub, survived, retry.root];
 
     // Rewarded-ad continue (optional, once per attempt, never forced).
-    const canContinue = !this.continueUsed && this.ads.isRewardedAdAvailable() && this.sim.hasHistory;
+    // Only offered where a 2s rewind is a genuine second chance: a crash, or a
+    // gridlock (pressure is rewound with extra relief). Queue overflows and a
+    // missed ambulance window would re-fail immediately.
+    const rewindable = reason === 'crash' || reason === 'gridlock';
+    const canContinue =
+      rewindable && !this.continueUsed && this.ads.isRewardedAdAvailable() && this.sim.hasHistory;
     if (canContinue) {
       getAnalytics().track('rewarded_offer_shown', {
         level: this.level.id,
@@ -490,6 +868,10 @@ export default class GameScene extends Phaser.Scene {
     audio.play('engine');
     this.refreshButtons();
     this.updateHud();
+    this.warnPlayed = false;
+    this.criticalPlayed = false;
+    this.ambulanceAnnounced = this.sim.emergency?.active ?? false;
+    this.ambulanceCleared = this.sim.emergency?.crossed ?? false;
 
     const toast = this.add
       .text(DESIGN_WIDTH / 2, DESIGN_HEIGHT / 2 - 60, 'GO!', {
@@ -541,7 +923,24 @@ export default class GameScene extends Phaser.Scene {
       completionTime: round1(time),
       grade,
       perfect,
+      objectiveType: this.level.objective.type,
+      pressurePeak: round2(this.sim.pressure.peak),
+      longestQueue: this.sim.maxQueueSeen,
     });
+    getAnalytics().track('objective_completed', {
+      level: this.level.id,
+      attempt: this.attempt,
+      objectiveType: this.level.objective.type,
+      completionTime: round1(time),
+    });
+    if (this.sim.pressure.enabled) {
+      getAnalytics().track('pressure_peak', {
+        level: this.level.id,
+        attempt: this.attempt,
+        pressurePeak: round2(this.sim.pressure.peak),
+        outcome: 'completed',
+      });
+    }
     if (perfect) {
       getAnalytics().track('perfect_flow', {
         level: this.level.id,
@@ -757,8 +1156,13 @@ export default class GameScene extends Phaser.Scene {
     this.cineReturnStarted = false;
     this.cameras.main.setZoom(1);
     this.cameras.main.setScroll(0, 0);
+    this.resetFeedbackFlags();
+    this.vignette?.setAlpha(0);
+    this.pressureBar?.setAlpha(1);
+    this.drawPressureBar(0);
     this.refreshButtons();
     this.updateHud();
+    this.setStatusColor();
     audio.play('engine');
   }
 
@@ -794,6 +1198,19 @@ export default class GameScene extends Phaser.Scene {
         return this.sim.lights.serialize();
       },
       restart: () => this.restart(),
+      /** Gameplay V2 test hooks: force pressure / read objective state. */
+      setPressure: (v: number) => {
+        this.sim.pressure.set(v);
+        return this.sim.pressure.value;
+      },
+      objective: () => ({
+        type: this.level.objective.type,
+        pressure: this.sim.pressure.value,
+        pressureEnabled: this.sim.pressure.enabled,
+        queues: this.sim.queueLengths(),
+        emergency: this.sim.emergency,
+        failReason: this.sim.failReason,
+      }),
       /**
        * Deterministic collision for E2E: clear the junction and launch one
        * eastbound and one northbound car at the crossing point together.
@@ -822,6 +1239,10 @@ export default class GameScene extends Phaser.Scene {
 
 function round1(v: number): number {
   return Math.round(v * 10) / 10;
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
 }
 
 function gradeFor(time: number, par: number): string {

@@ -26,7 +26,7 @@ function singleDirLevel(dir: 'E' | 'N', initialGreen: string[], groups?: LightGr
       { type: 'car', dir, at: 0.5 },
       { type: 'car', dir, at: 2.2 },
     ],
-    objective: { type: 'clear-all', totalVehicles: 2 },
+    objective: { type: 'CLEAR_TRAFFIC', totalVehicles: 2 },
   };
 }
 
@@ -81,7 +81,7 @@ describe('vehicle physics', () => {
         { type: 'car', dir: 'E', at: 0.55 },
         { type: 'car', dir: 'E', at: 0.6 },
       ],
-      objective: { type: 'clear-all', totalVehicles: 3 },
+      objective: { type: 'CLEAR_TRAFFIC', totalVehicles: 3 },
     };
     const sim = new TrafficSim(level);
     run(sim, 6);
@@ -125,7 +125,7 @@ describe('collision + win condition', () => {
         { type: 'car', dir: 'E', at: 1.75 },
         { type: 'car', dir: 'N', at: 0.6 },
       ],
-      objective: { type: 'clear-all', totalVehicles: 2 },
+      objective: { type: 'CLEAR_TRAFFIC', totalVehicles: 2 },
     };
     const sim = new TrafficSim(level);
     // Ignore clearance rules – simulate a dangerous double-green.
@@ -150,7 +150,7 @@ describe('collision + win condition', () => {
         { type: 'car', dir: 'E', at: 3.0 },
       ],
       initialGreen: ['ns'],
-      objective: { type: 'clear-all', totalVehicles: 2 },
+      objective: { type: 'CLEAR_TRAFFIC', totalVehicles: 2 },
     };
     const sim = new TrafficSim(level);
     // Player asks for EW green while the north car is mid-approach, then
