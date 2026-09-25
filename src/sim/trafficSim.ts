@@ -1,10 +1,13 @@
 import type {
   DirectionId,
+  FailReason,
   GamePhase,
   LevelConfig,
+  LevelObjective,
   LightGroupDef,
   VehicleSpec,
   VehicleSnapshot,
+  VehicleType,
   WorldSnapshot,
 } from '../types';
 import { SIM, VEHICLE } from '../config/game';
@@ -12,6 +15,7 @@ import { TrafficLightController } from './trafficLights';
 import { isHorizontal, exitS, stopLineS, positionOf } from './geometry';
 import { createVehicle, stepVehicle, type SimVehicle } from './vehicle';
 import { findCollisionPair } from './collision';
+import { PressureSystem, queueLengths } from './pressure';
 
 /** Fixed physics timestep (seconds). */
 const FIXED_DT = 1 / 60;
@@ -22,6 +26,24 @@ export interface CrashEvent {
   /** World-space impact point. */
   x: number;
   y: number;
+}
+
+/** Live state of the EMERGENCY objective (also exposed for HUD/analytics). */
+export interface EmergencyState {
+  /** Whether the ambulance has spawned yet. */
+  active: boolean;
+  /** Sim time the ambulance entered the world. */
+  spawnedAt: number;
+  /** Seconds allowed from spawn until the ambulance clears the junction. */
+  timeLimit: number;
+  /** Seconds left (clamped at 0). Equals timeLimit until the ambulance spawns. */
+  remaining: number;
+  /** Ambulance has fully cleared the intersection box. */
+  crossed: boolean;
+  /** Sim time when it crossed (for analytics). */
+  crossedAt: number | null;
+  /** Vehicle id of the tracked ambulance, once spawned. */
+  vehicleId: number | null;
 }
 
 /**
@@ -41,6 +63,14 @@ export class TrafficSim {
   /** Longest any single vehicle has been stopped (perfect-flow metric). */
   maxStopTime = 0;
   clearedCount = 0;
+  /** Why the level ended when phase is 'crash' or 'failed'. */
+  failReason: FailReason | null = null;
+  /** Traffic Pressure meter (disabled unless the level opts in). */
+  pressure: PressureSystem;
+  /** Longest queue seen this attempt (analytics / QUEUE_LIMIT HUD). */
+  maxQueueSeen = 0;
+  /** EMERGENCY objective tracking (null on other objectives). */
+  emergency: EmergencyState | null = null;
 
   private nextId = 1;
   private snapshots: WorldSnapshot[] = [];
@@ -56,7 +86,38 @@ export class TrafficSim {
       this.allDirections(),
       level.initialGreen,
     );
+    this.pressure = new PressureSystem(level.pressure);
     this.reset();
+  }
+
+  get objective(): LevelObjective {
+    return this.level.objective;
+  }
+
+  /** Seconds left for a SURVIVE objective (0 for other objectives). */
+  get surviveRemaining(): number {
+    const obj = this.level.objective;
+    if (obj.type !== 'SURVIVE') return 0;
+    return Math.max(0, obj.seconds - this.time);
+  }
+
+  /** Waiting vehicles per direction (only directions with a queue). */
+  queueLengths(): Partial<Record<DirectionId, number>> {
+    return queueLengths(this.vehicles);
+  }
+
+  /** Longest current queue over all lanes. */
+  get longestQueue(): number {
+    let m = 0;
+    for (const n of Object.values(this.queueLengths())) m = Math.max(m, n ?? 0);
+    return m;
+  }
+
+  /** The tracked ambulance, if it is currently in the world. */
+  get ambulance(): SimVehicle | null {
+    const id = this.emergency?.vehicleId;
+    if (id == null) return null;
+    return this.vehicles.find((v) => v.id === id) ?? null;
   }
 
   private allDirections(): DirectionId[] {
@@ -88,6 +149,10 @@ export class TrafficSim {
     this.freezeTimer = 0;
     this.maxStopTime = 0;
     this.clearedCount = 0;
+    this.failReason = null;
+    this.maxQueueSeen = 0;
+    this.pressure.reset();
+    this.emergency = this.initEmergency();
     this.nextId = 1;
     this.snapshots = [];
     this.snapshotAcc = 0;
@@ -100,6 +165,20 @@ export class TrafficSim {
     );
     this.lights.setTime(0);
     this.lights.update();
+  }
+
+  private initEmergency(): EmergencyState | null {
+    const obj = this.level.objective;
+    if (obj.type !== 'EMERGENCY') return null;
+    return {
+      active: false,
+      spawnedAt: 0,
+      timeLimit: obj.timeLimit,
+      remaining: obj.timeLimit,
+      crossed: false,
+      crossedAt: null,
+      vehicleId: null,
+    };
   }
 
   /** Tap a light group. Returns true when the controller state moved. */
@@ -156,6 +235,11 @@ export class TrafficSim {
       );
       this.vehicles.push(ev);
       this.spawnedCount += 1;
+      if (spec.type === 'ambulance' && this.emergency && !this.emergency.active) {
+        this.emergency.active = true;
+        this.emergency.spawnedAt = this.time;
+        this.emergency.vehicleId = ev.id;
+      }
     }
   }
 
@@ -211,10 +295,12 @@ export class TrafficSim {
     }
 
     // Exits.
+    let clearedThisStep = 0;
     if (this.vehicles.length > 0) {
       const survived = this.vehicles.filter((v) => {
         if (v.s >= v.exitS) {
           this.clearedCount += 1;
+          clearedThisStep += 1;
           this.maxStopTime = Math.max(this.maxStopTime, v.stopTime);
           return false;
         }
@@ -222,6 +308,12 @@ export class TrafficSim {
       });
       this.vehicles = survived;
     }
+
+    // Traffic pressure + queue bookkeeping.
+    this.pressure.step({ dt, vehicles: this.vehicles, clearedThisStep });
+    const longest = this.longestQueue;
+    if (longest > this.maxQueueSeen) this.maxQueueSeen = longest;
+    this.updateEmergency();
 
     // Collisions.
     const pair = findCollisionPair(this.vehicles, this.level.layout);
@@ -239,12 +331,19 @@ export class TrafficSim {
       a.s = Math.max(0, a.s - 9);
       b.s = Math.max(0, b.s - 9);
       this.phase = 'crash';
+      this.failReason = 'crash';
       // Snapshot history is intentionally kept: the rewarded "continue" rewinds it.
       return;
     }
 
-    // Win.
-    if (this.spawnedCount >= this.level.spawn.length && this.vehicles.length === 0) {
+    // Objective rules (fail first, then win).
+    const fail = this.evaluateFailure();
+    if (fail) {
+      this.failReason = fail;
+      this.phase = 'failed';
+      return;
+    }
+    if (this.evaluateWin()) {
       this.phase = 'complete';
       return;
     }
@@ -259,6 +358,70 @@ export class TrafficSim {
     }
   }
 
+  // --- objectives ----------------------------------------------------------
+  private updateEmergency(): void {
+    const em = this.emergency;
+    if (!em || !em.active) return;
+    if (!em.crossed) {
+      em.remaining = Math.max(0, em.timeLimit - (this.time - em.spawnedAt));
+      const amb = this.ambulance;
+      if (amb) {
+        // "Through" = rear bumper past the far side of the junction box.
+        const clearS = amb.stopS + this.level.layout.roadWidth + amb.spec.length + 8;
+        if (amb.s >= clearS) {
+          em.crossed = true;
+          em.crossedAt = this.time;
+        }
+      } else if (this.vehicles.every((v) => v.id !== em.vehicleId)) {
+        // Exited the screen without passing the check (should not happen, but
+        // never let a cleared ambulance count as a failure).
+        em.crossed = true;
+        em.crossedAt = this.time;
+      }
+    }
+  }
+
+  private get allTrafficCleared(): boolean {
+    return this.spawnedCount >= this.level.spawn.length && this.vehicles.length === 0;
+  }
+
+  private evaluateFailure(): FailReason | null {
+    const obj = this.level.objective;
+    // Gridlock applies to every level that enables pressure.
+    if (this.pressure.failed) return 'gridlock';
+    switch (obj.type) {
+      case 'PRESSURE_LIMIT':
+        if (this.pressure.enabled && this.pressure.value >= obj.maxPressure - 1e-9) {
+          return 'gridlock';
+        }
+        return null;
+      case 'QUEUE_LIMIT':
+        return this.longestQueue > obj.maxQueue ? 'queue_limit' : null;
+      case 'EMERGENCY': {
+        const em = this.emergency;
+        if (em && em.active && !em.crossed && em.remaining <= 0) return 'emergency_timeout';
+        return null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  private evaluateWin(): boolean {
+    const obj = this.level.objective;
+    switch (obj.type) {
+      case 'SURVIVE':
+        return this.time >= obj.seconds || this.allTrafficCleared;
+      case 'EMERGENCY':
+        return this.allTrafficCleared && (this.emergency?.crossed ?? true);
+      case 'CLEAR_TRAFFIC':
+      case 'PRESSURE_LIMIT':
+      case 'QUEUE_LIMIT':
+      default:
+        return this.allTrafficCleared;
+    }
+  }
+
   // --- debug / test hooks --------------------------------------------------
   /** Remove every vehicle (test tooling only). */
   debugClear(): void {
@@ -269,7 +432,7 @@ export class TrafficSim {
    * Place a vehicle at an exact travelled distance with an exact speed.
    * Test tooling only – never called by gameplay.
    */
-  debugPlace(type: 'car' | 'van' | 'truck', dir: DirectionId, s: number, v: number): SimVehicle {
+  debugPlace(type: VehicleType, dir: DirectionId, s: number, v: number): SimVehicle {
     const ev = createVehicle(
       this.nextId++,
       type,
@@ -310,6 +473,7 @@ export class TrafficSim {
       })),
       lights: this.lights.serialize(),
       spawnedCount: this.spawnedCount,
+      pressure: this.pressure.value,
     };
   }
 
@@ -329,6 +493,7 @@ export class TrafficSim {
 
     this.phase = 'running';
     this.crash = null;
+    this.failReason = null;
     this.timeOffset += Math.max(0, this.time - snap.t);
     this.time = snap.t;
     this.vehicles = snap.vehicles.map((vs) => {
@@ -346,6 +511,19 @@ export class TrafficSim {
     });
     this.spawnedCount = snap.spawnedCount;
     this.lights.restore(snap.lights);
+    // Rewind pressure too, with a little extra relief so the continue is a
+    // genuine second chance rather than an immediate re-fail.
+    this.pressure.set(Math.max(0, (snap.pressure ?? 0) - 0.15));
+    if (this.emergency) {
+      const em = this.emergency;
+      const stillHere = this.vehicles.some((v) => v.id === em.vehicleId);
+      if (em.active && !em.crossed && !stillHere && em.spawnedAt > this.time) {
+        // Ambulance had not spawned yet at the snapshot: re-arm the objective.
+        em.active = false;
+        em.vehicleId = null;
+        em.remaining = em.timeLimit;
+      }
+    }
     this.snapshots = this.snapshots.filter((s) => s.t <= snap.t);
     this.snapshotAcc = 0;
     this.freezeTimer = SIM.continueFreezeSeconds;
@@ -357,6 +535,17 @@ export class TrafficSim {
   debugState() {
     return {
       phase: this.phase,
+      failReason: this.failReason,
+      objective: this.level.objective.type,
+      pressure: Math.round(this.pressure.value * 100) / 100,
+      queues: this.queueLengths(),
+      emergency: this.emergency
+        ? {
+            active: this.emergency.active,
+            crossed: this.emergency.crossed,
+            remaining: Math.round(this.emergency.remaining * 10) / 10,
+          }
+        : null,
       time: this.displayTime,
       spawnedCount: this.spawnedCount,
       total: this.level.spawn.length,

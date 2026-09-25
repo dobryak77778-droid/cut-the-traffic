@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { LAYOUT } from '../data/levels/common';
 import { paintWorld } from '../render/worldArt';
 import {
+  buildAmbulanceLightTextures,
   buildShadowTexture,
   buildSparkTexture,
   buildStarburstTexture,
@@ -30,6 +31,7 @@ export default class BootScene extends Phaser.Scene {
     world.destroy();
 
     buildVehicleTextures(this);
+    buildAmbulanceLightTextures(this);
     buildShadowTexture(this);
     buildSparkTexture(this);
     buildStarburstTexture(this);

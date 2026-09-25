@@ -16,7 +16,17 @@ export type AnalyticsEvent =
   | 'interstitial_eligible'
   | 'interstitial_shown'
   | 'level_select_opened'
-  | 'settings_opened';
+  | 'settings_opened'
+  // Gameplay V2
+  | 'pressure_high'
+  | 'pressure_peak'
+  | 'gridlock_failure'
+  | 'queue_limit_failure'
+  | 'ambulance_spawned'
+  | 'ambulance_success'
+  | 'ambulance_failure'
+  | 'objective_completed'
+  | 'objective_failed';
 
 export type AnalyticsPayload = Record<string, string | number | boolean | undefined>;
 

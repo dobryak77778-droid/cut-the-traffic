@@ -129,6 +129,61 @@ function paintTruck(g: Phaser.GameObjects.Graphics, cabColor: number, boxColor: 
   lights(g, L, W);
 }
 
+/**
+ * Ambulance: white box body, red belt stripe, red cross on the roof and a
+ * roof light bar. The flashing lights themselves are a separate overlay
+ * texture (`amb-light`) toggled by VehicleView so the body stays static.
+ */
+function paintAmbulance(g: Phaser.GameObjects.Graphics): void {
+  const L = 56;
+  const W = 27;
+  const body = 0xf7f9fb;
+  const red = 0xd8342b;
+  const dark = shade(body, 0.78);
+  wheels(g, L, W, [-19, 11]);
+  // main box
+  g.fillStyle(body, 1);
+  g.fillRoundedRect(-L / 2, -W / 2, L, W, 5);
+  // cab nose
+  g.fillStyle(dark, 1);
+  g.fillRoundedRect(L / 2 - 15, -W / 2 + 1, 15, W - 2, 4);
+  // windshield + side window
+  g.fillStyle(GLASS, 1);
+  g.fillRoundedRect(L / 2 - 12, -W / 2 + 4, 8, W - 8, 2);
+  g.fillStyle(GLASS_DARK, 1);
+  g.fillRoundedRect(L / 2 - 21, -W / 2 + 4.5, 5, W - 9, 2);
+  // red belt stripe along both sides
+  g.fillStyle(red, 1);
+  g.fillRect(-L / 2 + 2, -W / 2 + 2, L - 18, 3);
+  g.fillRect(-L / 2 + 2, W / 2 - 5, L - 18, 3);
+  // roof cross
+  g.fillStyle(red, 1);
+  g.fillRect(-14, -1.75, 12, 3.5);
+  g.fillRect(-9.75, -6, 3.5, 12);
+  // light bar base (lights are drawn by the overlay)
+  g.fillStyle(0x2b313a, 1);
+  g.fillRoundedRect(L / 2 - 27, -W / 2 + 6, 5, W - 12, 1.5);
+  // skirt
+  g.fillStyle(dark, 1);
+  g.fillRect(-L / 2, W / 2 - 3, L, 2);
+  lights(g, L, W);
+}
+
+/** Two-lamp light bar overlay for the ambulance (red half / blue half). */
+export function buildAmbulanceLightTextures(scene: Phaser.Scene): void {
+  const make = (key: string, left: number, right: number) => {
+    const g = scene.add.graphics();
+    g.fillStyle(left, 1);
+    g.fillRoundedRect(0, 0, 5, 7, 1.5);
+    g.fillStyle(right, 1);
+    g.fillRoundedRect(0, 8, 5, 7, 1.5);
+    g.generateTexture(key, 5, 15);
+    g.destroy();
+  };
+  make('amb-light-a', 0xff5a4d, 0x2a4b6e);
+  make('amb-light-b', 0x7a2a25, 0x4aa8ff);
+}
+
 export interface TextureSpec {
   key: string;
   type: VehicleType;
@@ -156,6 +211,15 @@ export function buildVehicleTextures(scene: Phaser.Scene): TextureSpec[] {
     g.destroy();
     out.push({ key, type: 'van', length: 58, width: 27 });
   });
+
+  {
+    const key = 'tex-ambulance-0';
+    const g = scene.add.graphics();
+    paintAmbulance(g);
+    g.generateTexture(key, 56 + 4, 27 + 4);
+    g.destroy();
+    out.push({ key, type: 'ambulance', length: 56, width: 27 });
+  }
 
   TRUCK_CAB_COLORS.forEach((cab, i) => {
     const key = `tex-truck-${i}`;

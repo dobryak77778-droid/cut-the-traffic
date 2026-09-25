@@ -31,7 +31,7 @@ describe('level data', () => {
         expect(s.at).toBeGreaterThan(0);
         expect(s.at).toBeGreaterThanOrEqual(last); // sorted, non-decreasing
         last = s.at;
-        expect(['car', 'van', 'truck']).toContain(s.type);
+        expect(['car', 'van', 'truck', 'ambulance']).toContain(s.type);
         expect(ALL_DIRS).toContain(s.dir);
       }
     }
@@ -86,6 +86,55 @@ describe('level data', () => {
       expect(level.hint.length).toBeGreaterThan(0);
       expect(level.layout.roadWidth).toBeGreaterThan(0);
       expect(level.speedMul).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('level data – Gameplay V2 objectives', () => {
+  it('uses a supported objective type on every level', () => {
+    const types = ['CLEAR_TRAFFIC', 'SURVIVE', 'PRESSURE_LIMIT', 'EMERGENCY', 'QUEUE_LIMIT'];
+    for (const level of LEVELS) expect(types).toContain(level.objective.type);
+  });
+
+  it('only the designated levels were converted; the rest stay CLEAR_TRAFFIC', () => {
+    expect(getLevel(2).objective.type).toBe('CLEAR_TRAFFIC');
+    expect(getLevel(2).pressure?.enabled).toBe(true);
+    expect(getLevel(4).objective.type).toBe('QUEUE_LIMIT');
+    expect(getLevel(6).objective.type).toBe('SURVIVE');
+    expect(getLevel(7).objective.type).toBe('EMERGENCY');
+    for (const id of [1, 3, 5, 8, 9, 10]) {
+      expect(getLevel(id).objective.type).toBe('CLEAR_TRAFFIC');
+      expect(getLevel(id).pressure?.enabled ?? false).toBe(false);
+    }
+  });
+
+  it('EMERGENCY levels schedule exactly one ambulance; other levels none', () => {
+    for (const level of LEVELS) {
+      const n = level.spawn.filter((s) => s.type === 'ambulance').length;
+      if (level.objective.type === 'EMERGENCY') expect(n).toBe(1);
+      else expect(n).toBe(0);
+    }
+  });
+
+  it('SURVIVE levels keep spawning traffic through most of the window', () => {
+    for (const level of LEVELS) {
+      if (level.objective.type !== 'SURVIVE') continue;
+      const lastSpawn = level.spawn[level.spawn.length - 1].at;
+      expect(lastSpawn).toBeGreaterThan(level.objective.seconds * 0.7);
+      expect(level.pressure?.enabled).toBe(true);
+    }
+  });
+
+  it('objective parameters are sane', () => {
+    for (const level of LEVELS) {
+      const o = level.objective;
+      if (o.type === 'QUEUE_LIMIT') expect(o.maxQueue).toBeGreaterThanOrEqual(2);
+      if (o.type === 'SURVIVE') expect(o.seconds).toBeGreaterThanOrEqual(15);
+      if (o.type === 'EMERGENCY') expect(o.timeLimit).toBeGreaterThanOrEqual(8);
+      if (o.type === 'PRESSURE_LIMIT') {
+        expect(o.maxPressure).toBeGreaterThan(0);
+        expect(o.maxPressure).toBeLessThanOrEqual(1);
+      }
     }
   });
 });

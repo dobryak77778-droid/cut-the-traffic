@@ -3,12 +3,14 @@ import { GROUPS, makeLevel, schedule } from './common';
 
 /**
  * Level 6 – Close quarters: bursts of vehicles in the same lane force real
- * queuing. A tight group arrives together and leaves together.
+ * queuing. Gameplay V2: SURVIVE – traffic keeps arriving for the whole
+ * objective window; the player wins by keeping pressure off the ceiling for
+ * 35 seconds rather than by emptying the screen.
  */
 export const level06: LevelConfig = makeLevel(
   6,
   'Close Quarters',
-  'QUEUES FORM',
+  'KEEP IT MOVING',
   [GROUPS.ew, GROUPS.ns],
   schedule(1.3, 2.6, [
     { type: 'car', dir: 'E' },
@@ -24,6 +26,27 @@ export const level06: LevelConfig = makeLevel(
     { type: 'car', dir: 'S', gap: 1.3 },
     { type: 'car', dir: 'E', gap: 0.9 },
     { type: 'car', dir: 'N', gap: 1.4 },
+    // Second wave is denser and keeps the junction busy until the timer ends.
+    { type: 'car', dir: 'W', gap: 1.1 },
+    { type: 'car', dir: 'S', gap: 0.8 },
+    { type: 'van', dir: 'N', gap: 0.9 },
+    { type: 'car', dir: 'E', gap: 0.8 },
+    { type: 'car', dir: 'W', gap: 0.7 },
+    { type: 'car', dir: 'S', gap: 1.0 },
+    { type: 'car', dir: 'N', gap: 0.8 },
+    { type: 'van', dir: 'E', gap: 0.9 },
+    { type: 'car', dir: 'W', gap: 0.8 },
+    { type: 'car', dir: 'S', gap: 0.9 },
+    { type: 'car', dir: 'E', gap: 0.8 },
+    { type: 'car', dir: 'N', gap: 0.9 },
+    { type: 'car', dir: 'W', gap: 0.8 },
+    { type: 'car', dir: 'S', gap: 0.9 },
+    { type: 'car', dir: 'E', gap: 0.8 },
+    { type: 'car', dir: 'N', gap: 1.0 },
   ]),
-  { parTime: 30 },
+  {
+    parTime: 35,
+    objective: { type: 'SURVIVE', seconds: 35 },
+    pressure: { enabled: true },
+  },
 );

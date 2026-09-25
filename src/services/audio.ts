@@ -17,7 +17,12 @@ type SfxName =
   | 'levelComplete'
   | 'perfect'
   | 'button'
-  | 'rewarded';
+  | 'rewarded'
+  | 'pressureWarn'
+  | 'pressureCritical'
+  | 'gridlock'
+  | 'siren'
+  | 'ambulanceClear';
 
 interface AudioManagerOptions {
   isSoundOn: () => boolean;
@@ -172,6 +177,29 @@ export class AudioManager {
       case 'rewarded':
         this.tone(660, 90, { type: 'triangle', volume: 0.28 });
         this.tone(990, 160, { type: 'triangle', volume: 0.28, delayMs: 90 });
+        break;
+      case 'pressureWarn':
+        // Soft two-note nudge when pressure gets high.
+        this.tone(392, 90, { type: 'triangle', volume: 0.16 });
+        this.tone(330, 140, { type: 'triangle', volume: 0.14, delayMs: 100 });
+        break;
+      case 'pressureCritical':
+        this.tone(311, 110, { type: 'triangle', volume: 0.2 });
+        this.tone(311, 110, { type: 'triangle', volume: 0.2, delayMs: 160 });
+        break;
+      case 'gridlock':
+        this.tone(220, 260, { type: 'sawtooth', volume: 0.22, glideTo: 110 });
+        this.noise(260, 0.18, 500);
+        break;
+      case 'siren':
+        // Short hi-lo announcing the ambulance; deliberately brief.
+        this.tone(660, 180, { type: 'triangle', volume: 0.16 });
+        this.tone(520, 180, { type: 'triangle', volume: 0.16, delayMs: 190 });
+        this.tone(660, 180, { type: 'triangle', volume: 0.14, delayMs: 380 });
+        break;
+      case 'ambulanceClear':
+        this.tone(587, 90, { type: 'triangle', volume: 0.24 });
+        this.tone(880, 170, { type: 'triangle', volume: 0.24, delayMs: 90 });
         break;
       case 'engine':
         this.startEngine();

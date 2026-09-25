@@ -2,7 +2,9 @@ import type {
   DirectionId,
   LevelConfig,
   LevelLayout,
+  LevelObjective,
   LightGroupDef,
+  PressureConfig,
   VehicleSpec,
   VehicleType,
 } from '../../types';
@@ -60,8 +62,23 @@ export function makeLevel(
   hint: string,
   groups: LightGroupDef[],
   spawn: VehicleSpec[],
-  opts: { speedMul?: number; parTime: number; initialGreen?: string[] },
+  opts: {
+    speedMul?: number;
+    parTime: number;
+    initialGreen?: string[];
+    /**
+     * Objective without `totalVehicles` – it is always derived from the spawn
+     * list. Defaults to CLEAR_TRAFFIC.
+     */
+    objective?: DistributiveOmit<LevelObjective, 'totalVehicles'>;
+    /** Enables the Traffic Pressure meter (with optional tuning overrides). */
+    pressure?: Partial<PressureConfig>;
+  },
 ): LevelConfig {
+  const objective = {
+    ...(opts.objective ?? { type: 'CLEAR_TRAFFIC' }),
+    totalVehicles: spawn.length,
+  } as LevelObjective;
   return {
     id,
     name,
@@ -71,7 +88,10 @@ export function makeLevel(
     spawn,
     speedMul: opts.speedMul ?? 1,
     parTime: opts.parTime,
-    objective: { type: 'clear-all', totalVehicles: spawn.length },
+    objective,
     initialGreen: opts.initialGreen,
+    pressure: opts.pressure,
   };
 }
+
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
